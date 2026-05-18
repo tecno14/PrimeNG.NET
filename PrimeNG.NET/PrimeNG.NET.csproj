@@ -4,7 +4,28 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+	<PackageId>PrimeNG.NET</PackageId>
+	<Version>1.0.0</Version>
+	<Authors>tecno14</Authors>
+	<Company>tecno14</Company>
+	<Description>PrimeNG.NET – PrimeNG-style filtering/sorting/paging for .NET</Description>
+
+	<PackageLicenseExpression>MIT</PackageLicenseExpression>
+	<PackageProjectUrl>https://github.com/tecno14/PrimeNG.NET</PackageProjectUrl>
+	<RepositoryUrl>https://github.com/tecno14/PrimeNG.NET</RepositoryUrl>
+	<RepositoryType>git</RepositoryType>
+	<PackageReadmeFile>README.md</PackageReadmeFile>
+
+	<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.8" />
