@@ -5,9 +5,6 @@ env:
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*.*.*'
 
 jobs:
   publish:
@@ -15,6 +12,16 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Extract version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+
+    - name: Update csproj version
+      run: |
+        csproj_file=$(find . -name "*.csproj" | head -n 1)
+        echo "Updating version in $csproj_file to $VERSION"
+        sed -i "s#<Version>.*</Version>#<Version>${VERSION}</Version>#" "$csproj_file"
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
