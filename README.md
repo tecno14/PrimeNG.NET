@@ -219,10 +219,6 @@ PrimeNG.NET/
 dotnet build PrimeNG.NET/PrimeNG.NET.csproj
 ```
 
-## Roadmap ideas
-
-Contributions welcome: `endsWith` / `notContains` for strings, global filter, multi-sort, and filter operators (`and` / `or`) as PrimeNG supports on the client.
-
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
