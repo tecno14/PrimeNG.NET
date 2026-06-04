@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using PrimeNG.NET.Requests;
 using System.Linq.Dynamic.Core;
+using System.Linq.Expressions;
 using System.Reflection;
 
 namespace PrimeNG.NET.Extensions;
@@ -138,9 +139,9 @@ public static class PrimeNgQueryableExtensions
     }
 
     public static IQueryable<T> ApplyPrimeNgSorting<T>(
-        this IQueryable<T> query,
-        PrimeNgTableRequest request,
-        ILogger? logger = null)
+      this IQueryable<T> query,
+      PrimeNgTableRequest request,
+      ILogger? logger = null)
     {
         try
         {
@@ -149,6 +150,36 @@ public static class PrimeNgQueryableExtensions
 
             var direction = request.SortOrder == 1 ? "asc" : "desc";
 
+            // Detect string property
+            var param = Expression.Parameter(typeof(T), "x");
+            var property = Expression.PropertyOrField(param, request.SortField);
+
+            // Natural sort only for string fields
+            if (property.Type == typeof(string))
+            {
+                var sql = $@"
+                CASE 
+                    WHEN PATINDEX('%[^0-9]%', [{request.SortField}] + 'X') = 1 
+                        THEN 2147483647
+                    ELSE TRY_CONVERT(
+                        int,
+                        LEFT(
+                            [{request.SortField}],
+                            PATINDEX('%[^0-9]%', [{request.SortField}] + 'X') - 1
+                        )
+                    )
+                END";
+
+                // FIRST ORDER: numeric prefix
+                var ordered = query.OrderBy(sql + " " + direction);
+
+                // SECOND ORDER: full string
+                ordered = ordered.ThenBy($"{request.SortField} {direction}");
+
+                return ordered;
+            }
+
+            // Normal sorting for non-string fields
             return query.OrderBy($"{request.SortField} {direction}");
         }
         catch (Exception ex)
