@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="PrimeNG.NET.Tests/PrimeNG.NET.Tests.csproj" />
   <Project Path="PrimeNG.NET/PrimeNG.NET.csproj" />
 </Solution>

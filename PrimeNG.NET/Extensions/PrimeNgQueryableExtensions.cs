@@ -83,27 +83,27 @@ public static class PrimeNgQueryableExtensions
             PrimeNgMatchMode.Contains =>
                 query.Where(x =>
                     x != null &&
-                    EF.Functions.Like(EF.Property<string>(x, propName), $"%{value}%")),
+                    EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"%{value}%")),
 
             PrimeNgMatchMode.NotContains =>
                 query.Where(x =>
                     x != null &&
-                    !EF.Functions.Like(EF.Property<string>(x, propName), $"%{value}%")),
+                    !EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"%{value}%")),
 
             PrimeNgMatchMode.StartsWith =>
                 query.Where(x =>
                     x != null &&
-                    EF.Functions.Like(EF.Property<string>(x, propName), $"{value}%")),
+                    EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"{value}%")),
 
             PrimeNgMatchMode.EndsWith =>
                 query.Where(x =>
                     x != null &&
-                    EF.Functions.Like(EF.Property<string>(x, propName), $"%{value}")),
+                    EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"%{value}")),
 
             PrimeNgMatchMode.Equals =>
                 query.Where(x =>
                     x != null &&
-                    EF.Property<string>(x, propName) == value),
+                    EF.Property<string>(x, propName).ToLower() == value),
 
             _ => query
         };
@@ -148,39 +148,21 @@ public static class PrimeNgQueryableExtensions
             if (string.IsNullOrEmpty(request.SortField))
                 return query;
 
-            var direction = request.SortOrder == 1 ? "asc" : "desc";
+            var prop = typeof(T).GetProperty(
+                request.SortField,
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
 
-            // Detect string property
-            var param = Expression.Parameter(typeof(T), "x");
-            var property = Expression.PropertyOrField(param, request.SortField);
+            if (prop == null)
+                return query;
 
-            // Natural sort only for string fields
-            if (property.Type == typeof(string))
-            {
-                var sql = $@"
-                CASE 
-                    WHEN PATINDEX('%[^0-9]%', [{request.SortField}] + 'X') = 1 
-                        THEN 2147483647
-                    ELSE TRY_CONVERT(
-                        int,
-                        LEFT(
-                            [{request.SortField}],
-                            PATINDEX('%[^0-9]%', [{request.SortField}] + 'X') - 1
-                        )
-                    )
-                END";
+            var propName = prop.Name;
+            var ascending = request.SortOrder == 1;
 
-                // FIRST ORDER: numeric prefix
-                var ordered = query.OrderBy(sql + " " + direction);
+            if (prop.PropertyType == typeof(string))
+                return ApplyNaturalStringSort(query, propName, ascending);
 
-                // SECOND ORDER: full string
-                ordered = ordered.ThenBy($"{request.SortField} {direction}");
-
-                return ordered;
-            }
-
-            // Normal sorting for non-string fields
-            return query.OrderBy($"{request.SortField} {direction}");
+            var direction = ascending ? "asc" : "desc";
+            return query.OrderBy($"{propName} {direction}");
         }
         catch (Exception ex)
         {
@@ -189,6 +171,67 @@ public static class PrimeNgQueryableExtensions
             return query;
         }
     }
+
+    private static IQueryable<T> ApplyNaturalStringSort<T>(
+        IQueryable<T> query,
+        string propName,
+        bool ascending)
+    {
+        var param = Expression.Parameter(typeof(T), "x");
+        var stringProp = Expression.Call(
+            GetEfPropertyMethod(typeof(string)),
+            param,
+            Expression.Constant(propName));
+
+        var keySelector = BuildNaturalSortKeyExpression(stringProp);
+        var keyLambda = Expression.Lambda<Func<T, int>>(keySelector, param);
+        var stringLambda = Expression.Lambda<Func<T, string>>(stringProp, param);
+
+        return ascending
+            ? query.OrderBy(keyLambda).ThenBy(stringLambda)
+            : query.OrderByDescending(keyLambda).ThenByDescending(stringLambda);
+    }
+
+    private static Expression BuildNaturalSortKeyExpression(Expression stringProp)
+    {
+        var suffix = Expression.Call(
+            typeof(string).GetMethod(nameof(string.Concat), [typeof(string), typeof(string)])!,
+            stringProp,
+            Expression.Constant("X"));
+
+        var patIndex = Expression.Call(
+            typeof(SqlServerDbFunctionsExtensions).GetMethod(
+                nameof(SqlServerDbFunctionsExtensions.PatIndex),
+                [typeof(DbFunctions), typeof(string), typeof(string)])!,
+            Expression.Property(null, typeof(EF), nameof(EF.Functions)),
+            Expression.Constant("%[^0-9]%"),
+            suffix);
+
+        var length = Expression.Subtract(
+            Expression.Convert(patIndex, typeof(int)),
+            Expression.Constant(1));
+
+        var prefix = Expression.Call(
+            stringProp,
+            typeof(string).GetMethod(nameof(string.Substring), [typeof(int), typeof(int)])!,
+            Expression.Constant(0),
+            length);
+
+        return Expression.Condition(
+            Expression.Equal(patIndex, Expression.Constant(1L)),
+            Expression.Constant(int.MaxValue),
+            Expression.Call(
+                typeof(Convert).GetMethod(nameof(Convert.ToInt32), [typeof(string)])!,
+                prefix));
+    }
+
+    private static MethodInfo GetEfPropertyMethod(Type propertyType) =>
+        typeof(EF).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.Name == nameof(EF.Property)
+                && m.IsGenericMethod
+                && m.GetParameters().Length == 2
+                && m.GetParameters()[1].ParameterType == typeof(string))
+            .MakeGenericMethod(propertyType);
 
     public static IQueryable<T> ApplyPrimeNgPaging<T>(
         this IQueryable<T> query,
