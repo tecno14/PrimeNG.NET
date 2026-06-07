@@ -21,7 +21,7 @@ jobs:
 
     - name: Update csproj version
       run: |
-        csproj_file=$(find . -name "*.csproj" | head -n 1)
+        csproj_file="PrimeNG.NET/PrimeNG.NET.csproj"
         echo "Updating version in $csproj_file to $VERSION"
         sed -i "s#<Version>.*</Version>#<Version>${VERSION}</Version>#" "$csproj_file"
 
