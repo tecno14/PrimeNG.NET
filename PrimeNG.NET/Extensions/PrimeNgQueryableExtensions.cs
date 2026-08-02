@@ -1,6 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using PrimeNG.NET.Requests;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Dynamic.Core;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -25,12 +26,8 @@ public static class PrimeNgQueryableExtensions
                 if (string.IsNullOrWhiteSpace(rawValue)) 
                     continue;
 
-                // Case-insensitive property lookup
-                var prop = typeof(T).GetProperty(
-                    filter.Key, 
-                    BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-                
-                if (prop == null) 
+                // Case-insensitive property lookup (supports nested paths like "Name.First")
+                if (!TryResolvePropertyPath(typeof(T), filter.Key, out var prop, out var propPath))
                     continue;
 
                 // 1. Determine the target type (handling nullables)
@@ -53,12 +50,12 @@ public static class PrimeNgQueryableExtensions
                 if (targetType == typeof(string))
                 {
                     string val = rawValue.ToLower();
-                    query = ApplyStringFilter(query, prop.Name, mode, val);
+                    query = ApplyStringFilter(query, propPath, mode, val);
                 }
                 else
                 {
                     // For Non-strings (Guid, Int, Bool), only Equals/NotEquals make sense
-                    query = ApplyExactFilter(query, prop.Name, mode, convertedValue);
+                    query = ApplyExactFilter(query, propPath, mode, convertedValue);
                 }
             }
             catch (Exception ex)
@@ -71,71 +68,81 @@ public static class PrimeNgQueryableExtensions
 
     private static IQueryable<T> ApplyStringFilter<T>(
     IQueryable<T> query,
-    string propName,
+    string propPath,
     PrimeNgMatchMode mode,
     string value)
     {
         if (string.IsNullOrEmpty(value))
             return query;
 
-        return mode switch
+        var param = Expression.Parameter(typeof(T), "x");
+        var property = BuildPropertyAccess(param, propPath);
+        var toLower = Expression.Call(
+            property,
+            typeof(string).GetMethod(nameof(string.ToLower), Type.EmptyTypes)!);
+
+        var likeMethod = typeof(DbFunctionsExtensions).GetMethod(
+            nameof(DbFunctionsExtensions.Like),
+            [typeof(DbFunctions), typeof(string), typeof(string)])!;
+        var efFunctions = Expression.Property(null, typeof(EF), nameof(EF.Functions));
+
+        Expression Like(string pattern) =>
+            Expression.Call(likeMethod, efFunctions, toLower, Expression.Constant(pattern));
+
+        Expression? predicate = mode switch
         {
-            PrimeNgMatchMode.Contains =>
-                query.Where(x =>
-                    x != null &&
-                    EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"%{value}%")),
-
-            PrimeNgMatchMode.NotContains =>
-                query.Where(x =>
-                    x != null &&
-                    !EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"%{value}%")),
-
-            PrimeNgMatchMode.StartsWith =>
-                query.Where(x =>
-                    x != null &&
-                    EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"{value}%")),
-
-            PrimeNgMatchMode.EndsWith =>
-                query.Where(x =>
-                    x != null &&
-                    EF.Functions.Like(EF.Property<string>(x, propName).ToLower(), $"%{value}")),
-
-            PrimeNgMatchMode.Equals =>
-                query.Where(x =>
-                    x != null &&
-                    EF.Property<string>(x, propName).ToLower() == value),
-
-            _ => query
+            PrimeNgMatchMode.Contains => Like($"%{value}%"),
+            PrimeNgMatchMode.NotContains => Expression.Not(Like($"%{value}%")),
+            PrimeNgMatchMode.StartsWith => Like($"{value}%"),
+            PrimeNgMatchMode.EndsWith => Like($"%{value}"),
+            PrimeNgMatchMode.Equals => Expression.Equal(toLower, Expression.Constant(value)),
+            _ => null
         };
+
+        if (predicate is null)
+            return query;
+
+        if (!typeof(T).IsValueType)
+        {
+            predicate = Expression.AndAlso(
+                Expression.NotEqual(param, Expression.Constant(null, typeof(T))),
+                predicate);
+        }
+
+        return query.Where(Expression.Lambda<Func<T, bool>>(predicate, param));
     }
 
     private static IQueryable<T> ApplyExactFilter<T>(
         IQueryable<T> query,
-        string propName,
+        string propPath,
         PrimeNgMatchMode mode,
         object value)
     {
         if (value is null)
             return query;
 
-        // Use EF.Property<object> and cast it inside the expression or dynamic LINQ
-        // For simplicity with multiple types, we check the common modes:
-        return mode switch
+        var param = Expression.Parameter(typeof(T), "x");
+        var property = BuildPropertyAccess(param, propPath);
+        var typedConstant = Expression.Convert(Expression.Constant(value), property.Type);
+
+        Expression? predicate = mode switch
         {
-            PrimeNgMatchMode.Equals =>
-                query.Where(x =>
-                    x != null &&
-                    EF.Property<object>(x, propName) != null &&
-                    EF.Property<object>(x, propName).Equals(value)),
-
-            PrimeNgMatchMode.NotEquals =>
-                query.Where(x =>
-                    x != null &&
-                    EF.Property<object>(x, propName) != null &&
-                    !EF.Property<object>(x, propName).Equals(value)),
-
-            _ => query
+            PrimeNgMatchMode.Equals => Expression.Equal(property, typedConstant),
+            PrimeNgMatchMode.NotEquals => Expression.NotEqual(property, typedConstant),
+            _ => null
         };
+
+        if (predicate is null)
+            return query;
+
+        if (!typeof(T).IsValueType)
+        {
+            predicate = Expression.AndAlso(
+                Expression.NotEqual(param, Expression.Constant(null, typeof(T))),
+                predicate);
+        }
+
+        return query.Where(Expression.Lambda<Func<T, bool>>(predicate, param));
     }
 
     public static IQueryable<T> ApplyPrimeNgSorting<T>(
@@ -148,21 +155,17 @@ public static class PrimeNgQueryableExtensions
             if (string.IsNullOrEmpty(request.SortField))
                 return query;
 
-            var prop = typeof(T).GetProperty(
-                request.SortField,
-                BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-
-            if (prop == null)
+            if (!TryResolvePropertyPath(typeof(T), request.SortField, out var prop, out var propPath))
                 return query;
 
-            var propName = prop.Name;
             var ascending = request.SortOrder == 1;
+            var leafType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
 
-            if (prop.PropertyType == typeof(string))
-                return ApplyNaturalStringSort(query, propName, ascending);
+            if (leafType == typeof(string))
+                return ApplyNaturalStringSort(query, propPath, ascending);
 
             var direction = ascending ? "asc" : "desc";
-            return query.OrderBy($"{propName} {direction}");
+            return query.OrderBy($"{propPath} {direction}");
         }
         catch (Exception ex)
         {
@@ -174,14 +177,11 @@ public static class PrimeNgQueryableExtensions
 
     private static IQueryable<T> ApplyNaturalStringSort<T>(
         IQueryable<T> query,
-        string propName,
+        string propPath,
         bool ascending)
     {
         var param = Expression.Parameter(typeof(T), "x");
-        var stringProp = Expression.Call(
-            GetEfPropertyMethod(typeof(string)),
-            param,
-            Expression.Constant(propName));
+        var stringProp = BuildPropertyAccess(param, propPath);
 
         var keySelector = BuildNaturalSortKeyExpression(stringProp);
         var keyLambda = Expression.Lambda<Func<T, int>>(keySelector, param);
@@ -225,13 +225,63 @@ public static class PrimeNgQueryableExtensions
                 prefix));
     }
 
-    private static MethodInfo GetEfPropertyMethod(Type propertyType) =>
-        typeof(EF).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.Name == nameof(EF.Property)
-                && m.IsGenericMethod
-                && m.GetParameters().Length == 2
-                && m.GetParameters()[1].ParameterType == typeof(string))
-            .MakeGenericMethod(propertyType);
+    /// <summary>
+    /// Resolves a dotted property path (e.g. "Name.First") with case-insensitive segment matching.
+    /// </summary>
+    private static bool TryResolvePropertyPath(
+        Type rootType,
+        string path,
+        [NotNullWhen(true)] out PropertyInfo? leafProperty,
+        [NotNullWhen(true)] out string? resolvedPath)
+    {
+        leafProperty = null;
+        resolvedPath = null;
+
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        var segments = path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length == 0)
+            return false;
+
+        var currentType = rootType;
+        PropertyInfo? prop = null;
+        var resolved = new string[segments.Length];
+
+        for (var i = 0; i < segments.Length; i++)
+        {
+            prop = currentType.GetProperty(
+                segments[i],
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+
+            if (prop is null)
+                return false;
+
+            resolved[i] = prop.Name;
+            currentType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+        }
+
+        leafProperty = prop!;
+        resolvedPath = string.Join('.', resolved);
+        return true;
+    }
+
+    private static Expression BuildPropertyAccess(Expression instance, string propertyPath)
+    {
+        Expression access = instance;
+        foreach (var segment in propertyPath.Split('.'))
+        {
+            var prop = access.Type.GetProperty(
+                segment,
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase)
+                ?? throw new InvalidOperationException(
+                    $"Property '{segment}' not found on type '{access.Type.Name}'.");
+
+            access = Expression.Property(access, prop);
+        }
+
+        return access;
+    }
 
     public static IQueryable<T> ApplyPrimeNgPaging<T>(
         this IQueryable<T> query,
