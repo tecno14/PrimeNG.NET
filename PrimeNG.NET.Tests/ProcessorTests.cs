@@ -96,7 +96,10 @@ public class SqlServerProcessorTests(SqlServerTestFixture fixture)
             }
         };
 
-        var response = await PrimeNgTableProcessor.ProcessAsync(Context.Products.AsQueryable(), request);
+        var response = await PrimeNgTableProcessor.ProcessAsync(
+            Context.Products.AsQueryable(),
+            request,
+            naturalStringSort: true);
 
         Assert.Equal(6, response.TotalRecords);
         Assert.Equal(

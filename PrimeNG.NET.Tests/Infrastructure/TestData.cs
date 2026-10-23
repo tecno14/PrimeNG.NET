@@ -30,4 +30,15 @@ public static class TestData
         "20 delta",
         "apple",
     ];
+
+    /// <summary>Lexical (ordinal) order used when the EF provider has no natural-sort translation.</summary>
+    public static IReadOnlyList<string> LexicalSortNamesAscending { get; } =
+    [
+        "09 item",
+        "1 alpha",
+        "10 gamma",
+        "2 beta",
+        "20 delta",
+        "apple",
+    ];
 }

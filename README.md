@@ -10,7 +10,8 @@ PrimeNG tables with `[lazy]="true"` POST or GET a predictable request shape. Eac
 
 - **One-call processing** — `PrimeNgTableProcessor.ProcessAsync` runs filter → count → sort → page → materialize.
 - **Composable extensions** — `ApplyPrimeNgFiltering`, `ApplyPrimeNgSorting`, `ApplyPrimeNgPaging` on any `IQueryable<T>`.
-- **EF Core–friendly** — string filters use `EF.Functions.Like` so predicates translate to SQL.
+- **EF Core–friendly** — string filters use `EF.Functions.Like` so predicates translate to SQL. Works with **SQL Server**, **PostgreSQL (Npgsql)**, and **SQLite**.
+- **Portable string sort** — default is lexical `OrderBy`. Opt into numeric-prefix (“natural”) sort with `naturalStringSort: true` on SQL Server and PostgreSQL; other providers fall back to lexical.
 - **Type-aware filters** — property lookup is case-insensitive; values are converted for `string`, numeric, `bool`, `Guid`, and nullable variants.
 - **Optional logging** — pass `ILogger` to log filter/sort issues without failing the request.
 
@@ -72,6 +73,7 @@ public class ProductsController(AppDbContext db) : ControllerBase
         var query = db.Products.AsQueryable();
 
         return await PrimeNgTableProcessor.ProcessAsync(query, request);
+        // Optional: ProcessAsync(query, request, naturalStringSort: true)
     }
 }
 ```
@@ -160,6 +162,8 @@ var filtered = query.ApplyPrimeNgFiltering(request, logger);
 var total = await filtered.CountAsync(cancellationToken);
 
 var sorted = filtered.ApplyPrimeNgSorting(request, logger);
+// Optional natural string sort (SQL Server / PostgreSQL):
+// var sorted = filtered.ApplyPrimeNgSorting(request, logger, naturalStringSort: true);
 var paged = sorted.ApplyPrimeNgPaging(request);
 
 var data = await paged.ToListAsync(cancellationToken);
@@ -172,6 +176,15 @@ return new PrimeNgTableResponse<Product>
 ```
 
 Order matches `ProcessAsync`: always count on the **filtered** query before sort/page.
+
+### String sorting
+
+| Mode | API | Behavior |
+|------|-----|----------|
+| **Lexical (default)** | `naturalStringSort: false` | Portable `OrderBy` on the string column. Works on all EF providers. |
+| **Natural (opt-in)** | `naturalStringSort: true` | Numeric-prefix order (`"2"` before `"10"`) on **SQL Server** and **PostgreSQL (Npgsql)**. SQLite / InMemory / unknown providers fall back to lexical. |
+
+Natural sort does **not** require a package reference to EF SqlServer or Npgsql in **PrimeNG.NET** itself—the host app already references its database provider.
 
 ### Custom page size cap (`TakeLast`)
 

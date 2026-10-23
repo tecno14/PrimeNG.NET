@@ -5,8 +5,9 @@ internal static class NaturalSortKey
     internal const int NonNumericPrefix = int.MaxValue;
 
     /// <summary>
-    /// Sort key for natural (numeric-prefix) ordering of strings.
-    /// Mirrors the SQL Server expression used in <see cref="PrimeNgQueryableExtensions"/>.
+    /// In-memory sort key for natural (numeric-prefix) ordering of strings.
+    /// Mirrors the SQL Server / PostgreSQL expressions used when
+    /// <c>naturalStringSort: true</c> is passed to sorting APIs.
     /// </summary>
     internal static int FromString(string? value)
     {

@@ -1,10 +1,12 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Logging;
 using PrimeNG.NET.Requests;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq.Dynamic.Core;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.RegularExpressions;
 
 namespace PrimeNG.NET.Extensions;
 
@@ -145,10 +147,16 @@ public static class PrimeNgQueryableExtensions
         return query.Where(Expression.Lambda<Func<T, bool>>(predicate, param));
     }
 
+    /// <summary>
+    /// Applies PrimeNG table sorting. String fields use portable lexical <c>OrderBy</c> by default.
+    /// Pass <paramref name="naturalStringSort"/> to opt into numeric-prefix ordering on SQL Server
+    /// and PostgreSQL (Npgsql); other providers fall back to lexical sort.
+    /// </summary>
     public static IQueryable<T> ApplyPrimeNgSorting<T>(
       this IQueryable<T> query,
       PrimeNgTableRequest request,
-      ILogger? logger = null)
+      ILogger? logger = null,
+      bool naturalStringSort = false)
     {
         try
         {
@@ -161,8 +169,12 @@ public static class PrimeNgQueryableExtensions
             var ascending = request.SortOrder == 1;
             var leafType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
 
-            if (leafType == typeof(string))
-                return ApplyNaturalStringSort(query, propPath, ascending);
+            if (naturalStringSort && leafType == typeof(string))
+            {
+                var natural = TryApplyNaturalStringSort(query, propPath, ascending, logger);
+                if (natural is not null)
+                    return natural;
+            }
 
             var direction = ascending ? "asc" : "desc";
             return query.OrderBy($"{propPath} {direction}");
@@ -175,34 +187,145 @@ public static class PrimeNgQueryableExtensions
         }
     }
 
-    private static IQueryable<T> ApplyNaturalStringSort<T>(
+    private static IQueryable<T>? TryApplyNaturalStringSort<T>(
         IQueryable<T> query,
         string propPath,
-        bool ascending)
+        bool ascending,
+        ILogger? logger)
     {
+        var providerName = TryGetProviderName(query);
         var param = Expression.Parameter(typeof(T), "x");
         var stringProp = BuildPropertyAccess(param, propPath);
 
-        var keySelector = BuildNaturalSortKeyExpression(stringProp);
+        Expression? keySelector = null;
+        if (IsProvider(providerName, "Npgsql"))
+            keySelector = BuildPostgresNaturalSortKeyExpression(stringProp);
+        else if (IsProvider(providerName, "SqlServer"))
+            keySelector = TryBuildSqlServerNaturalSortKeyExpression(stringProp);
+
+        if (keySelector is null)
+        {
+            logger?.LogWarning(
+                "Natural string sort unavailable for provider '{Provider}'; falling back to lexical OrderBy.",
+                providerName ?? "(unknown)");
+            return null;
+        }
+
         var keyLambda = Expression.Lambda<Func<T, int>>(keySelector, param);
         var stringLambda = Expression.Lambda<Func<T, string>>(stringProp, param);
-
         return ascending
             ? query.OrderBy(keyLambda).ThenBy(stringLambda)
             : query.OrderByDescending(keyLambda).ThenByDescending(stringLambda);
     }
 
-    private static Expression BuildNaturalSortKeyExpression(Expression stringProp)
+    private static string? TryGetProviderName(IQueryable query)
     {
+        try
+        {
+            // DbSet implements IInfrastructure; composed queries (Where/OrderBy) often do not.
+            if (query is IInfrastructure<IServiceProvider> queryInfra)
+            {
+                var fromQuery = queryInfra.GetService<ICurrentDbContext>()?.Context.Database.ProviderName;
+                if (fromQuery is not null)
+                    return fromQuery;
+            }
+
+            if (query.Provider is IInfrastructure<IServiceProvider> providerInfra)
+            {
+                var fromProvider = providerInfra.GetService<ICurrentDbContext>()?.Context.Database.ProviderName;
+                if (fromProvider is not null)
+                    return fromProvider;
+            }
+
+            // EF Core 10: EntityQueryProvider is not IInfrastructure — infer from QueryCompiler deps.
+            return TryInferProviderNameFromQueryCompiler(query.Provider);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryInferProviderNameFromQueryCompiler(IQueryProvider provider)
+    {
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        var compiler = provider.GetType().GetField("_queryCompiler", flags)?.GetValue(provider);
+        if (compiler is null)
+            return null;
+
+        foreach (var fieldName in new[] { "_compiledQueryCacheKeyGenerator", "_evaluatableExpressionFilter" })
+        {
+            var value = compiler.GetType().GetField(fieldName, flags)?.GetValue(compiler);
+            var typeName = value?.GetType().FullName;
+            if (typeName is null)
+                continue;
+
+            if (typeName.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
+                return "Npgsql.EntityFrameworkCore.PostgreSQL";
+            if (typeName.Contains("SqlServer", StringComparison.OrdinalIgnoreCase))
+                return "Microsoft.EntityFrameworkCore.SqlServer";
+            if (typeName.Contains("Sqlite", StringComparison.OrdinalIgnoreCase))
+                return "Microsoft.EntityFrameworkCore.Sqlite";
+        }
+
+        return null;
+    }
+
+    private static bool IsProvider(string? providerName, string token) =>
+        providerName is not null
+        && providerName.Contains(token, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Npgsql translates <see cref="Regex.IsMatch(string, string)"/> and
+    /// <see cref="Regex.Replace(string, string, string)"/>. Use PostgreSQL backrefs (<c>\1</c>).
+    /// </summary>
+    private static Expression BuildPostgresNaturalSortKeyExpression(Expression stringProp)
+    {
+        var isMatch = typeof(Regex).GetMethod(
+            nameof(Regex.IsMatch),
+            [typeof(string), typeof(string)])!;
+        var replace = typeof(Regex).GetMethod(
+            nameof(Regex.Replace),
+            [typeof(string), typeof(string), typeof(string)])!;
+        var toInt32 = typeof(Convert).GetMethod(nameof(Convert.ToInt32), [typeof(string)])!;
+
+        var hasLeadingDigits = Expression.Call(
+            isMatch,
+            stringProp,
+            Expression.Constant(@"^\d"));
+
+        var digitPrefix = Expression.Call(
+            replace,
+            stringProp,
+            Expression.Constant(@"^(\d+).*$"),
+            Expression.Constant(@"\1"));
+
+        return Expression.Condition(
+            hasLeadingDigits,
+            Expression.Call(toInt32, digitPrefix),
+            Expression.Constant(NaturalSortKey.NonNumericPrefix));
+    }
+
+    /// <summary>
+    /// Optional SQL Server path via reflection so this library does not depend on EF SqlServer.
+    /// </summary>
+    private static Expression? TryBuildSqlServerNaturalSortKeyExpression(Expression stringProp)
+    {
+        var extensionsType = Type.GetType(
+            "Microsoft.EntityFrameworkCore.SqlServerDbFunctionsExtensions, Microsoft.EntityFrameworkCore.SqlServer");
+        var patIndexMethod = extensionsType?.GetMethod(
+            "PatIndex",
+            [typeof(DbFunctions), typeof(string), typeof(string)]);
+        if (patIndexMethod is null)
+            return null;
+
         var suffix = Expression.Call(
             typeof(string).GetMethod(nameof(string.Concat), [typeof(string), typeof(string)])!,
             stringProp,
             Expression.Constant("X"));
 
         var patIndex = Expression.Call(
-            typeof(SqlServerDbFunctionsExtensions).GetMethod(
-                nameof(SqlServerDbFunctionsExtensions.PatIndex),
-                [typeof(DbFunctions), typeof(string), typeof(string)])!,
+            patIndexMethod,
             Expression.Property(null, typeof(EF), nameof(EF.Functions)),
             Expression.Constant("%[^0-9]%"),
             suffix);
@@ -219,7 +342,7 @@ public static class PrimeNgQueryableExtensions
 
         return Expression.Condition(
             Expression.Equal(patIndex, Expression.Constant(1L)),
-            Expression.Constant(int.MaxValue),
+            Expression.Constant(NaturalSortKey.NonNumericPrefix),
             Expression.Call(
                 typeof(Convert).GetMethod(nameof(Convert.ToInt32), [typeof(string)])!,
                 prefix));

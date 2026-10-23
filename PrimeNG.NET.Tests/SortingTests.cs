@@ -69,16 +69,60 @@ public class SortingTests(SqliteTestFixture fixture)
 
         Assert.Equal(10, results.Count);
     }
+
+    [Fact]
+    public async Task String_Sort_Default_IsLexical_OnSqlite()
+    {
+        var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = 1 };
+
+        var results = await Context.Products
+            .Where(p => p.Category == "Sort")
+            .ApplyPrimeNgSorting(request)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(TestData.LexicalSortNamesAscending, results);
+    }
+
+    [Fact]
+    public async Task String_NaturalSort_FallsBackToLexical_OnSqlite()
+    {
+        var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = 1 };
+
+        var results = await Context.Products
+            .Where(p => p.Category == "Sort")
+            .ApplyPrimeNgSorting(request, naturalStringSort: true)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(TestData.LexicalSortNamesAscending, results);
+    }
 }
 
 [Collection("SqlServerDatabase")]
-public class SqlServerNaturalSortTests(SqlServerTestFixture fixture)
+public class SqlServerStringSortTests(SqlServerTestFixture fixture)
 {
     private TestDbContext Context => fixture.Context;
 
     private void EnsureSqlServerAvailable()
     {
         Skip.IfNot(fixture.IsAvailable, fixture.UnavailableReason ?? "SQL Server is not available.");
+    }
+
+    [SkippableFact]
+    public async Task String_Sort_Default_IsLexical()
+    {
+        EnsureSqlServerAvailable();
+
+        var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = 1 };
+
+        var results = await Context.Products
+            .Where(p => p.Category == "Sort")
+            .ApplyPrimeNgSorting(request)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(TestData.LexicalSortNamesAscending, results);
     }
 
     [SkippableFact]
@@ -90,7 +134,7 @@ public class SqlServerNaturalSortTests(SqlServerTestFixture fixture)
 
         var results = await Context.Products
             .Where(p => p.Category == "Sort")
-            .ApplyPrimeNgSorting(request)
+            .ApplyPrimeNgSorting(request, naturalStringSort: true)
             .Select(p => p.Name)
             .ToListAsync();
 
@@ -106,7 +150,7 @@ public class SqlServerNaturalSortTests(SqlServerTestFixture fixture)
 
         var results = await Context.Products
             .Where(p => p.Category == "Sort")
-            .ApplyPrimeNgSorting(request)
+            .ApplyPrimeNgSorting(request, naturalStringSort: true)
             .Select(p => p.Name)
             .ToListAsync();
 
@@ -122,10 +166,69 @@ public class SqlServerNaturalSortTests(SqlServerTestFixture fixture)
 
         var results = await Context.Products
             .Where(p => p.Category == "Sort")
-            .ApplyPrimeNgSorting(request)
+            .ApplyPrimeNgSorting(request, naturalStringSort: true)
             .Select(p => p.Name)
             .ToListAsync();
 
         Assert.Equal(TestData.NaturalSortNamesAscending, results);
+    }
+}
+
+[Collection("PostgresDatabase")]
+public class PostgresStringSortTests(PostgresTestFixture fixture)
+{
+    private TestDbContext Context => fixture.Context;
+
+    private void EnsurePostgresAvailable()
+    {
+        Skip.IfNot(fixture.IsAvailable, fixture.UnavailableReason ?? "PostgreSQL is not available.");
+    }
+
+    [SkippableFact]
+    public async Task String_Sort_Default_IsLexical()
+    {
+        EnsurePostgresAvailable();
+
+        var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = 1 };
+
+        var results = await Context.Products
+            .Where(p => p.Category == "Sort")
+            .ApplyPrimeNgSorting(request)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(TestData.LexicalSortNamesAscending, results);
+    }
+
+    [SkippableFact]
+    public async Task String_NaturalSort_Ascending()
+    {
+        EnsurePostgresAvailable();
+
+        var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = 1 };
+
+        var results = await Context.Products
+            .Where(p => p.Category == "Sort")
+            .ApplyPrimeNgSorting(request, naturalStringSort: true)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(TestData.NaturalSortNamesAscending, results);
+    }
+
+    [SkippableFact]
+    public async Task String_NaturalSort_Descending()
+    {
+        EnsurePostgresAvailable();
+
+        var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = -1 };
+
+        var results = await Context.Products
+            .Where(p => p.Category == "Sort")
+            .ApplyPrimeNgSorting(request, naturalStringSort: true)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(TestData.NaturalSortNamesAscending.Reverse().ToList(), results);
     }
 }
