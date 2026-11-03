@@ -71,6 +71,20 @@ public class SortingTests(SqliteTestFixture fixture)
     }
 
     [Fact]
+    public async Task UnmappedComputedProperty_Sort_IsSkipped_DoesNotThrow()
+    {
+        var request = new PrimeNgTableRequest { SortField = "DisplayLabel", SortOrder = 1 };
+
+        var results = await Context.Products
+            .OrderBy(p => p.Id)
+            .ApplyPrimeNgSorting(request)
+            .Select(p => p.Id)
+            .ToListAsync();
+
+        Assert.Equal(Enumerable.Range(1, 10), results);
+    }
+
+    [Fact]
     public async Task String_Sort_Default_IsLexical_OnSqlite()
     {
         var request = new PrimeNgTableRequest { SortField = "Name", SortOrder = 1 };

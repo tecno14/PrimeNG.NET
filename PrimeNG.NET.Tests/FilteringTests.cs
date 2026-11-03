@@ -262,4 +262,93 @@ public class FilteringTests(SqliteTestFixture fixture)
 
         Assert.Equal(10, count);
     }
+
+    [Fact]
+    public async Task Equals_EnumProperty_ByName_IsCaseInsensitive()
+    {
+        var request = new PrimeNgTableRequest
+        {
+            Filters = new Dictionary<string, PrimeNgFilter>
+            {
+                ["kind"] = new() { Value = "premium", MatchMode = "equals" }
+            }
+        };
+
+        var results = await Context.Products
+            .ApplyPrimeNgFiltering(request)
+            .Select(p => p.Name)
+            .OrderBy(n => n)
+            .ToListAsync();
+
+        Assert.Equal(["09 item", "Laptop Pro"], results);
+    }
+
+    [Fact]
+    public async Task Equals_EnumProperty_ByNumericString()
+    {
+        var request = new PrimeNgTableRequest
+        {
+            Filters = new Dictionary<string, PrimeNgFilter>
+            {
+                ["kind"] = new() { Value = "2", MatchMode = "equals" }
+            }
+        };
+
+        var count = await Context.Products
+            .ApplyPrimeNgFiltering(request)
+            .CountAsync();
+
+        Assert.Equal(3, count); // Clearance
+    }
+
+    [Fact]
+    public async Task NotEquals_EnumProperty()
+    {
+        var request = new PrimeNgTableRequest
+        {
+            Filters = new Dictionary<string, PrimeNgFilter>
+            {
+                ["kind"] = new() { Value = "Standard", MatchMode = "notEquals" }
+            }
+        };
+
+        var count = await Context.Products
+            .ApplyPrimeNgFiltering(request)
+            .CountAsync();
+
+        Assert.Equal(5, count); // Premium(2) + Clearance(3)
+    }
+
+    [Fact]
+    public async Task SkipsUnmappedComputedProperty_Filter()
+    {
+        var request = new PrimeNgTableRequest
+        {
+            Filters = new Dictionary<string, PrimeNgFilter>
+            {
+                ["displayLabel"] = new() { Value = "Laptop", MatchMode = "contains" }
+            }
+        };
+
+        var count = await Context.Products
+            .ApplyPrimeNgFiltering(request)
+            .CountAsync();
+
+        Assert.Equal(10, count);
+    }
+
+    [Theory]
+    [InlineData(typeof(TestProductKind), "Premium", true)]
+    [InlineData(typeof(TestProductKind), "premium", true)]
+    [InlineData(typeof(TestProductKind), "1", true)]
+    [InlineData(typeof(TestProductKind), "nope", false)]
+    [InlineData(typeof(Guid), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", true)]
+    [InlineData(typeof(Guid), "not-a-guid", false)]
+    public void TryConvertFilterValue_HandlesEnumsAndGuids(Type targetType, string raw, bool expected)
+    {
+        var ok = PrimeNgQueryableExtensions.TryConvertFilterValue(targetType, raw, out var value);
+        Assert.Equal(expected, ok);
+        if (expected)
+            Assert.NotNull(value);
+    }
 }

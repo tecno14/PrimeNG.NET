@@ -1,8 +1,10 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.Logging;
 using PrimeNG.NET.Requests;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Linq.Dynamic.Core;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -20,6 +22,8 @@ public static class PrimeNgQueryableExtensions
         if (request.Filters == null) 
             return query;
 
+        var entityType = TryGetEntityType(query, typeof(T));
+
         foreach (var filter in request.Filters)
         {
             try
@@ -32,18 +36,15 @@ public static class PrimeNgQueryableExtensions
                 if (!TryResolvePropertyPath(typeof(T), filter.Key, out var prop, out var propPath))
                     continue;
 
+                if (ShouldSkipUnmappedMember(entityType, prop, propPath, logger, "filter"))
+                    continue;
+
                 // 1. Determine the target type (handling nullables)
                 Type targetType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
 
                 // 2. Parse the filter value to match the property type
-                object convertedValue;
-                try
-                {
-                    convertedValue = targetType == typeof(Guid)
-                        ? Guid.Parse(rawValue)
-                        : Convert.ChangeType(rawValue, targetType);
-                }
-                catch { continue; } // Skip if value can't be converted to prop type
+                if (!TryConvertFilterValue(targetType, rawValue, out var convertedValue) || convertedValue is null)
+                    continue;
 
                 if (!Enum.TryParse<PrimeNgMatchMode>(filter.Value.MatchMode, true, out var mode))
                     continue;
@@ -56,7 +57,7 @@ public static class PrimeNgQueryableExtensions
                 }
                 else
                 {
-                    // For Non-strings (Guid, Int, Bool), only Equals/NotEquals make sense
+                    // For Non-strings (Guid, Int, Bool, Enum), only Equals/NotEquals make sense
                     query = ApplyExactFilter(query, propPath, mode, convertedValue);
                 }
             }
@@ -66,6 +67,47 @@ public static class PrimeNgQueryableExtensions
             }
         }
         return query;
+    }
+
+    /// <summary>
+    /// Converts a PrimeNG filter string to <paramref name="targetType"/>.
+    /// Supports Guid, enums (name or numeric), and <see cref="Convert.ChangeType"/>.
+    /// </summary>
+    internal static bool TryConvertFilterValue(
+        Type targetType,
+        string raw,
+        [NotNullWhen(true)] out object? value)
+    {
+        value = null;
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        try
+        {
+            if (targetType == typeof(Guid))
+            {
+                if (!Guid.TryParse(raw, out var guid))
+                    return false;
+                value = guid;
+                return true;
+            }
+
+            if (targetType.IsEnum)
+            {
+                if (!Enum.TryParse(targetType, raw, ignoreCase: true, out var parsed) || parsed is null)
+                    return false;
+                value = parsed;
+                return true;
+            }
+
+            value = Convert.ChangeType(raw, targetType, CultureInfo.InvariantCulture);
+            return value is not null;
+        }
+        catch
+        {
+            value = null;
+            return false;
+        }
     }
 
     private static IQueryable<T> ApplyStringFilter<T>(
@@ -166,6 +208,10 @@ public static class PrimeNgQueryableExtensions
             if (!TryResolvePropertyPath(typeof(T), request.SortField, out var prop, out var propPath))
                 return query;
 
+            var entityType = TryGetEntityType(query, typeof(T));
+            if (ShouldSkipUnmappedMember(entityType, prop, propPath, logger, "sort"))
+                return query;
+
             var ascending = request.SortOrder == 1;
             var leafType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
 
@@ -222,20 +268,9 @@ public static class PrimeNgQueryableExtensions
     {
         try
         {
-            // DbSet implements IInfrastructure; composed queries (Where/OrderBy) often do not.
-            if (query is IInfrastructure<IServiceProvider> queryInfra)
-            {
-                var fromQuery = queryInfra.GetService<ICurrentDbContext>()?.Context.Database.ProviderName;
-                if (fromQuery is not null)
-                    return fromQuery;
-            }
-
-            if (query.Provider is IInfrastructure<IServiceProvider> providerInfra)
-            {
-                var fromProvider = providerInfra.GetService<ICurrentDbContext>()?.Context.Database.ProviderName;
-                if (fromProvider is not null)
-                    return fromProvider;
-            }
+            var context = TryGetDbContext(query);
+            if (context?.Database.ProviderName is { } providerName)
+                return providerName;
 
             // EF Core 10: EntityQueryProvider is not IInfrastructure — infer from QueryCompiler deps.
             return TryInferProviderNameFromQueryCompiler(query.Provider);
@@ -244,6 +279,155 @@ public static class PrimeNgQueryableExtensions
         {
             return null;
         }
+    }
+
+    private static DbContext? TryGetDbContext(IQueryable query)
+    {
+        try
+        {
+            // DbSet implements IInfrastructure; composed queries (Where/OrderBy) often do not.
+            if (query is IInfrastructure<IServiceProvider> queryInfra)
+            {
+                var fromQuery = queryInfra.GetService<ICurrentDbContext>()?.Context;
+                if (fromQuery is not null)
+                    return fromQuery;
+            }
+
+            if (query.Provider is IInfrastructure<IServiceProvider> providerInfra)
+            {
+                var fromProvider = providerInfra.GetService<ICurrentDbContext>()?.Context;
+                if (fromProvider is not null)
+                    return fromProvider;
+            }
+
+            // EF Core 10: EntityQueryProvider is not IInfrastructure — dig into QueryCompiler.
+            return TryGetDbContextFromQueryCompiler(query.Provider);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return null;
+    }
+
+    private static DbContext? TryGetDbContextFromQueryCompiler(IQueryProvider provider)
+    {
+        const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        var compiler = provider.GetType().GetField("_queryCompiler", flags)?.GetValue(provider);
+        if (compiler is null)
+            return null;
+
+        foreach (var field in compiler.GetType().GetFields(flags))
+        {
+            var value = field.GetValue(compiler);
+            switch (value)
+            {
+                case ICurrentDbContext current:
+                    return current.Context;
+                case DbContext db:
+                    return db;
+            }
+        }
+
+        // QueryCompilerDependencies / similar often expose Context via a Dependencies object.
+        foreach (var field in compiler.GetType().GetFields(flags))
+        {
+            var deps = field.GetValue(compiler);
+            if (deps is null)
+                continue;
+
+            foreach (var depField in deps.GetType().GetFields(flags))
+            {
+                if (depField.GetValue(deps) is ICurrentDbContext current)
+                    return current.Context;
+            }
+
+            foreach (var depProp in deps.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (depProp.GetValue(deps) is ICurrentDbContext current)
+                    return current.Context;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEntityType? TryGetEntityType(IQueryable query, Type clrType)
+    {
+        var context = TryGetDbContext(query);
+        if (context is null)
+            return null;
+
+        return context.Model.FindEntityType(clrType);
+    }
+
+    /// <summary>
+    /// Skip CLR members that EF cannot translate: unmapped model properties, or get-only
+    /// computed members when the EF model is unavailable (composed queries).
+    /// </summary>
+    private static bool ShouldSkipUnmappedMember(
+        IEntityType? entityType,
+        PropertyInfo leafProperty,
+        string propPath,
+        ILogger? logger,
+        string action)
+    {
+        if (entityType is not null)
+        {
+            if (IsEfMappedPath(entityType, propPath))
+                return false;
+
+            logger?.LogWarning(
+                "Skipping {Action} on unmapped property '{Path}'.",
+                action,
+                propPath);
+            return true;
+        }
+
+        // No EF entity type (composed query / projection): skip get-only computed members.
+        if (IsGetOnlyComputedMember(leafProperty))
+        {
+            logger?.LogWarning(
+                "Skipping {Action} on get-only property '{Path}' (likely unmapped).",
+                action,
+                propPath);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsGetOnlyComputedMember(PropertyInfo property) =>
+        property.GetSetMethod(nonPublic: true) is null;
+
+    /// <summary>
+    /// True when every segment of <paramref name="propPath"/> is an EF-mapped property or navigation.
+    /// </summary>
+    internal static bool IsEfMappedPath(IEntityType entityType, string propPath)
+    {
+        var current = entityType;
+        var segments = propPath.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length == 0)
+            return false;
+
+        for (var i = 0; i < segments.Length; i++)
+        {
+            var name = segments[i];
+            var isLast = i == segments.Length - 1;
+
+            var property = current.FindProperty(name);
+            if (property is not null)
+                return isLast;
+
+            var navigation = current.FindNavigation(name);
+            if (navigation is null)
+                return false;
+
+            current = navigation.TargetEntityType;
+        }
+
+        return true;
     }
 
     private static string? TryInferProviderNameFromQueryCompiler(IQueryProvider provider)
